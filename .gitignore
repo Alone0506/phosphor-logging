@@ -1,3 +1,9 @@
 build*/
 subprojects/*
 !subprojects/*.wrap
+
+# meson auto generates a wrap redirect. Ignore it.
+subprojects/fmt.wrap
+subprojects/function2.wrap
+subprojects/stdexec.wrap
+subprojects/stdplus.wrap

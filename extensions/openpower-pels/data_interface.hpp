@@ -365,12 +365,12 @@ class DataInterfaceBase
      * @param[in] locationCode - Location code value starting with Ufcs-, and
      *                           if that isn't present it will be added first.
      *
-     * @param[in] node - The node number the location is on.
+     * @param[in] chassisNumber - The chassis in which the location code is for.
      *
      * @return std::string - The expanded location code
      */
     virtual std::string expandLocationCode(const std::string& locationCode,
-                                           uint16_t node) const = 0;
+                                           uint16_t chassisNumber) const = 0;
 
     /**
      * @brief Returns the inventory paths for the FRU that the location
@@ -382,8 +382,9 @@ class DataInterfaceBase
      *                           starting with Ufcs-, and if that isn't
      *                           present it will be added first.
      *
-     * @param[in] node - The node number the location is on.  Ignored if the
-     *                   expanded location code is passed in.
+     * @param[in] chassisNumber - The chassis in which the location code is for.
+     *                            Ignored if the expanded location code
+     *                            is passed in.
      *
      * @param[in] expanded - If the location code already has the relevant
      *                       VPD fields embedded in it.
@@ -391,7 +392,7 @@ class DataInterfaceBase
      * @return std::vector<std::string> - The inventory D-Bus objects
      */
     virtual std::vector<std::string> getInventoryFromLocCode(
-        const std::string& LocationCode, uint16_t node,
+        const std::string& LocationCode, uint16_t chassisNumber,
         bool expanded) const = 0;
 
     /**
@@ -431,12 +432,13 @@ class DataInterfaceBase
     /**
      * @brief Split location code into base and connector segments
      *
-     * A location code that ends in '-Tx', where 'x' is a number,
+     * A location code that ends in '-Tx' or '-Jxx', where 'x' is a number,
      * represents a connector, such as a USB cable connector.
      *
      * This function splits the passed in location code into a
      * base and connector segment.  e.g.:
      *   P0-T1 -> ['P0', '-T1']
+     *   P0-J00 -> [ 'P0', '-J00']
      *   P0 -> ['P0', '']
      *
      * @param[in] locationCode - location code to split
@@ -803,12 +805,12 @@ class DataInterface : public DataInterfaceBase
      * @param[in] locationCode - Location code value starting with Ufcs-, and
      *                           if that isn't present it will be added first.
      *
-     * @param[in] node - The node number the location is one.
+     * @param[in] chassisNumber - The chassis in which the location code is for.
      *
      * @return std::string - The expanded location code
      */
     std::string expandLocationCode(const std::string& locationCode,
-                                   uint16_t node) const override;
+                                   uint16_t chassisNumber) const override;
 
     /**
      * @brief Returns the inventory paths for the FRU that the location
@@ -820,8 +822,9 @@ class DataInterface : public DataInterfaceBase
      *                           starting with Ufcs-, and if that isn't
      *                           present it will be added first.
      *
-     * @param[in] node - The node number the location is on.  Ignored if the
-     *                   expanded location code is passed in.
+     * @param[in] chassisNumber - The chassis number the location is on.
+     *                            Ignored if the expanded location code
+     *                            is passed in.
      *
      * @param[in] expanded - If the location code already has the relevant
      *                       VPD fields embedded in it.
@@ -829,7 +832,7 @@ class DataInterface : public DataInterfaceBase
      * @return std::vector<std::string> - The inventory D-Bus objects
      */
     std::vector<std::string> getInventoryFromLocCode(
-        const std::string& locationCode, uint16_t node,
+        const std::string& locationCode, uint16_t chassisNumber,
         bool expanded) const override;
 
     /**
@@ -1040,7 +1043,7 @@ class DataInterface : public DataInterfaceBase
      * Needed because the location codes that come back from the
      * message registry and device callout JSON don't have it.
      *
-     * @param[in] - The location code without a prefix, like P1-C1
+     * @param[in] locationCode  - The location code without a prefix, like P1-C1
      *
      * @return std::string - The location code with the prefix
      */
@@ -1107,7 +1110,7 @@ class DataInterface : public DataInterfaceBase
     /**
      * @brief A slot object for async dbus call
      */
-    sdbusplus::slot_t _systemdSlot;
+    sdbusplus::slot _systemdSlot;
 };
 
 } // namespace pels

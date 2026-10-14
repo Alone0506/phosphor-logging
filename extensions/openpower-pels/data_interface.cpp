@@ -10,6 +10,7 @@
 #include <xyz/openbmc_project/State/Boot/Progress/server.hpp>
 
 #include <filesystem>
+#include <format>
 
 #ifdef PEL_ENABLE_PHAL
 #include <libekb.H>
@@ -38,6 +39,7 @@ constexpr auto pldm = "xyz.openbmc_project.PLDM";
 constexpr auto inventoryManager = "xyz.openbmc_project.Inventory.Manager";
 constexpr auto entityManager = "xyz.openbmc_project.EntityManager";
 constexpr auto systemd = "org.freedesktop.systemd1";
+constexpr auto settingsMgr = "xyz.openbmc_project.Settings";
 } // namespace service_name
 
 namespace object_path
@@ -86,6 +88,7 @@ constexpr auto invItem = "xyz.openbmc_project.Inventory.Item";
 constexpr auto invFan = "xyz.openbmc_project.Inventory.Item.Fan";
 constexpr auto invPowerSupply =
     "xyz.openbmc_project.Inventory.Item.PowerSupply";
+constexpr auto invChassis = "xyz.openbmc_project.Inventory.Item.Chassis";
 constexpr auto inventoryManager = "xyz.openbmc_project.Inventory.Manager";
 constexpr auto systemdMgr = "org.freedesktop.systemd1.Manager";
 constexpr auto redundancy = "xyz.openbmc_project.State.BMC.Redundancy";
@@ -107,7 +110,7 @@ std::pair<std::string, std::string>
     auto base = locationCode;
     std::string connector{};
 
-    auto pos = base.find("-T");
+    auto pos = std::min(base.rfind("-T"), base.rfind("-J"));
     if (pos != std::string::npos)
     {
         connector = base.substr(pos);
@@ -143,10 +146,10 @@ DataInterface::DataInterface(sdbusplus::bus_t& bus) :
             }
         }));
 
-    // Watch the host PEL enable property
+    // Watch the host PEL enable property [PC + NameOwnerChanged Signals]
     _properties.emplace_back(std::make_unique<PropertyWatcher<DataInterface>>(
-        bus, object_path::enableHostPELs, interface::enable, "Enabled", *this,
-        [this](const auto& value) {
+        bus, object_path::enableHostPELs, interface::enable, "Enabled", "",
+        service_name::settingsMgr, *this, [this](const auto& value) {
             if (std::get<bool>(value) != this->_sendPELsToHost)
             {
                 lg2::info("The send PELs to host setting changed to {VAL}",
@@ -468,34 +471,24 @@ std::string DataInterface::addLocationCodePrefix(
 }
 
 std::string DataInterface::expandLocationCode(const std::string& locationCode,
-                                              uint16_t /*node*/) const
+                                              uint16_t chassisNumber) const
 {
-    // Location codes for connectors are the location code of the FRU they are
-    // on, plus a '-Tx' segment.  Remove this last segment before expanding it
-    // and then add it back in afterwards.  This way, the connector doesn't have
-    // to be in the model just so that it can be expanded.
-    auto [baseLoc, connectorLoc] = extractConnectorFromLocCode(locationCode);
-
     auto method =
         _bus.new_method_call(service_name::vpdManager, object_path::vpdManager,
                              interface::vpdManager, "GetExpandedLocationCode");
 
-    method.append(addLocationCodePrefix(baseLoc), static_cast<uint16_t>(0));
+    method.append(addLocationCodePrefix(locationCode), chassisNumber);
 
     auto reply = _bus.call(method, dbusTimeout);
 
     auto expandedLocationCode = reply.unpack<std::string>();
 
-    if (!connectorLoc.empty())
-    {
-        expandedLocationCode += connectorLoc;
-    }
-
     return expandedLocationCode;
 }
 
 std::vector<std::string> DataInterface::getInventoryFromLocCode(
-    const std::string& locationCode, uint16_t node, bool expanded) const
+    const std::string& locationCode, uint16_t chassisNumber,
+    bool expanded) const
 {
     std::string methodName = expanded ? "GetFRUsByExpandedLocationCode"
                                       : "GetFRUsByUnexpandedLocationCode";
@@ -516,7 +509,7 @@ std::vector<std::string> DataInterface::getInventoryFromLocCode(
     }
     else
     {
-        method.append(addLocationCodePrefix(baseLoc), node);
+        method.append(addLocationCodePrefix(baseLoc), chassisNumber);
     }
 
     auto reply = _bus.call(method, dbusTimeout);
@@ -579,9 +572,21 @@ void DataInterface::setCriticalAssociation(const std::string& objectPath) const
 
     auto association = std::get<AssociationsProperty>(getAssociationValue);
 
-    AssociationTuple critAssociation{
-        "health_rollup", "critical",
-        "/xyz/openbmc_project/inventory/system/chassis"};
+    // Find the chassis ancestor of objectPath
+    std::string chassisPath{"/xyz/openbmc_project/inventory/system/chassis"};
+
+    auto method = _bus.new_method_call(service_name::objectMapper,
+                                       object_path::objectMapper,
+                                       interface::objectMapper, "GetAncestors");
+    method.append(objectPath, DBusInterfaceList{interface::invChassis});
+
+    auto ancestors = _bus.call(method, dbusTimeout).unpack<DBusSubTree>();
+    if (!ancestors.empty())
+    {
+        chassisPath = ancestors.begin()->first;
+    }
+
+    AssociationTuple critAssociation{"health_rollup", "critical", chassisPath};
 
     if (std::find(association.begin(), association.end(), critAssociation) ==
         association.end())
@@ -1080,7 +1085,7 @@ void DataInterface::subscribeToSystemdSignals()
         _systemdSlot = method.call_async([this](sdbusplus::message_t&& msg) {
             // Initializing with nullptr to indicate that it is not subscribed
             // to any signal.
-            this->_systemdSlot = sdbusplus::slot_t(nullptr);
+            this->_systemdSlot = sdbusplus::slot(nullptr);
             if (msg.is_method_error())
             {
                 auto* error = msg.get_error();
@@ -1135,7 +1140,7 @@ void DataInterface::unsubscribeFromSystemdSignals()
                                  interface::systemdMgr, "Unsubscribe");
         _systemdSlot = method.call_async([this](sdbusplus::message_t&& msg) {
             // Unsubscribing the _systemdSlot from the subscribed signal
-            this->_systemdSlot = sdbusplus::slot_t(nullptr);
+            this->_systemdSlot = sdbusplus::slot(nullptr);
             if (msg.is_method_error())
             {
                 auto* error = msg.get_error();

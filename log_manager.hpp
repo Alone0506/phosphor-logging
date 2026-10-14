@@ -5,8 +5,10 @@
 #include "bmc_pos_mgr.hpp"
 #include "elog_block.hpp"
 #include "elog_entry.hpp"
+#include "event_extensions/manager.hpp"
 #include "xyz/openbmc_project/Logging/Internal/Manager/server.hpp"
 
+#include <phosphor-logging/lg2.hpp>
 #include <phosphor-logging/log.hpp>
 #include <sdbusplus/bus.hpp>
 #include <sdeventplus/source/io.hpp>
@@ -15,6 +17,7 @@
 #include <xyz/openbmc_project/Logging/Entry/server.hpp>
 #include <xyz/openbmc_project/Logging/event.hpp>
 
+#include <filesystem>
 #include <list>
 
 namespace phosphor
@@ -286,11 +289,14 @@ class Manager : public details::ServerObject<details::ManagerIface>
      * @param[in] errLvl - level of the error
      * @param[in] additionalData - The AdditionalData property for the error
      * @param[in] ffdc - A vector of FFDC file info. Defaults to an empty
-     * vector.
+     *                  vector.
+     * @param[in] requests Event extension requests
+     *                     associated with the log entry.
      */
     auto createEntry(std::string errMsg, Entry::Level errLvl,
                      std::map<std::string, std::string> additionalData,
-                     const FFDCEntries& ffdc = FFDCEntries{})
+                     const FFDCEntries& ffdc = FFDCEntries{},
+                     const event_extensions::RequestList& requests = {})
         -> sdbusplus::object_path;
 
     /** @brief Notified on entry property changes
@@ -339,6 +345,87 @@ class Manager : public details::ServerObject<details::ManagerIface>
     void errorFileChanged(sdeventplus::source::IO& io, int fd,
                           uint32_t revents);
 
+    /**
+     * @brief Build event extension requests from additional
+     *        data.
+     *
+     * Extracts extension metadata from the _EXTENSIONS
+     * transport field and converts it into runtime event
+     * extension requests.
+     * The _EXTENSIONS entry is removed from @p additionalData
+     * after processing because it is transport-only metadata and
+     * should not be persisted with the log entry.
+     *
+     * @param[in,out] additionalData Event additional data.
+     *
+     * @return Event extension requests.
+     */
+    event_extensions::RequestList buildEventExtensionRequests(
+        std::map<std::string, std::string>& additionalData);
+
+    /**
+     * @brief Restore persisted event extensions.
+     *
+     * Recreates runtime event extensions from serialized
+     * extension data.
+     *
+     * @param[in,out] entry Entry receiving restored extensions.
+     * @param[in] eventExtensions Serialized event extension data
+     *                            indexed by interface name.
+     */
+    void restoreEventExtensions(Entry& entry,
+                                const nlohmann::json& eventExtensions);
+
+    /**
+     * @brief Collect runtime metadata from registered providers.
+     *
+     * Invokes all registered runtime metadata providers and
+     * aggregates their contributions into a single metadata
+     * object.
+     *
+     * Runtime metadata providers are intended to contribute
+     * extension-specific metadata derived from runtime
+     * platform state.
+     *
+     * @param[in] message
+     *     Log message associated with the entry.
+     *
+     * @param[in] level
+     *     Severity level of the entry.
+     *
+     * @param[in] additionalData
+     *     Additional data supplied during log creation.
+     *
+     * @return Aggregated runtime metadata collected from all
+     *         registered providers.
+     */
+    static nlohmann::json collectRuntimeMetadata(
+        const std::string& message, Entry::Level level,
+        const std::map<std::string, std::string>& additionalData);
+
+    /**
+     * @brief Add or update extension metadata.
+     *
+     * Stores the supplied payload under the specified
+     * extension interface within the _EXTENSIONS
+     * transport object.
+     *
+     * Existing metadata associated with other extension
+     * interfaces is preserved.
+     *
+     * @param[in,out] additionalData
+     *     Additional data map.
+     *
+     * @param[in] interface
+     *     Extension interface name.
+     *
+     * @param[in] payload
+     *     Extension payload.
+     */
+    static void updateExtensions(
+        std::map<std::string, std::string>& additionalData,
+        std::string_view interface, const nlohmann::json& payload);
+
     /** @brief Persistent sdbusplus DBus bus connection. */
     sdbusplus::bus_t& busLog;
 
@@ -385,6 +472,14 @@ class Manager : public details::ServerObject<details::ManagerIface>
      * entry directory.
      */
     int errDirWatcherWD = -1;
+
+    /**
+     * @brief Event extension framework manager.
+     *
+     * Owns registered event extension providers and creates
+     * runtime event extensions for log entries.
+     */
+    event_extensions::Manager eventExtensionManager;
 };
 
 } // namespace internal
@@ -425,7 +520,7 @@ class Manager : public details::ServerObject<DeleteAllIface, CreateIface>
      */
     void deleteAll() override
     {
-        log<level::INFO>("Deleting all log entries");
+        lg2::info("Deleting all log entries");
         auto numbersOfLogs = manager.eraseAll();
         manager.createFromEvent(
             LoggingCleared("NUMBER_OF_LOGS", numbersOfLogs));
@@ -455,14 +550,14 @@ class Manager : public details::ServerObject<DeleteAllIface, CreateIface>
      * @param[in] additionalData - The AdditionalData property for the error
      * @param[in] ffdc - A vector of FFDC file info
      */
-    void createWithFFDCFiles(
+    auto createWithFFDCFiles(
         std::string message, Severity severity,
         std::map<std::string, std::string> additionalData,
         std::vector<std::tuple<CreateIface::FFDCFormat, uint8_t, uint8_t,
                                sdbusplus::message::unix_fd>>
-            ffdc) override
+            ffdc) -> sdbusplus::object_path override
     {
-        manager.create(message, severity, additionalData, ffdc);
+        return manager.create(message, severity, additionalData, ffdc);
     }
 
   private:

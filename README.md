@@ -9,6 +9,7 @@ logging.
 - [Structured Logging](#structured-logging)
 - [Event Logs](#event-logs)
 - [Event Log Extensions](#event-log-extensions)
+- [Log Entry Extensions](#log-entry-extensions)
 - [Remote Logging](#remote-logging-via-rsyslog)
 - [Boot Fail on Hardware Errors](#boot-fail-on-hardware-errors)
 - [Encoding BMC position in entry ID](#encoding-the-bmc-position-in-the-entry-id)
@@ -18,7 +19,7 @@ logging.
 To build this package, do the following steps:
 
 1. meson builddir
-2. ninja -c builddir
+2. ninja -C builddir
 
 ## Structured Logging
 
@@ -431,8 +432,18 @@ The BMC will send everything. Any kind of filtering and appropriate storage will
 have to be managed on the rsyslog server. Various examples are available on the
 internet. Here are few pointers :
 <https://www.rsyslog.com/storing-and-forwarding-remote-messages/>
-<https://www.rsyslog.com/doc/rsyslog%255Fconf%255Ffilter.html>
-<https://www.thegeekdiary.com/understanding-rsyslog-filter-options/>
+<https://docs.rsyslog.com/doc/configuration/filters.html>
+<https://docs.rsyslog.com/doc/configuration/index.html>
+
+## Log Entry Extensions
+
+Log Entry Extensions allow log entries to be augmented with additional
+schema-specific D-Bus interfaces.
+
+`LogManager` owns an extension `Manager`, which maintains registered extension
+`Provider`s. When an event requests an extension, the corresponding `Provider`
+creates a runtime `Extension` instance that is attached to and owned by the
+associated `Entry`.
 
 ### Configuring rsyslog server for remote logging
 

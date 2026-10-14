@@ -2,6 +2,7 @@
 
 #include "log_manager.hpp"
 
+#include "constants.hpp"
 #include "elog_entry.hpp"
 #include "elog_meta.hpp"
 #include "elog_serialize.hpp"
@@ -35,6 +36,11 @@ extern const std::map<
     phosphor::logging::metadata::Metadata,
     std::function<phosphor::logging::metadata::associations::Type>>
     meta;
+
+namespace
+{
+constexpr auto extensionsKey = "_EXTENSIONS";
+} // namespace
 
 namespace phosphor
 {
@@ -217,7 +223,9 @@ void Manager::_commit(uint64_t transactionId [[maybe_unused]],
 
 auto Manager::createEntry(std::string errMsg, Entry::Level errLvl,
                           std::map<std::string, std::string> additionalData,
-                          const FFDCEntries& ffdc) -> sdbusplus::object_path
+                          const FFDCEntries& ffdc,
+                          const event_extensions::RequestList& requests)
+    -> sdbusplus::object_path
 {
     if (!Extensions::disableDefaultLogCaps())
     {
@@ -280,14 +288,24 @@ auto Manager::createEntry(std::string errMsg, Entry::Level errLvl,
     auto additionalDataVec = util::additional_data::combine(additionalData);
     processMetadata(errMsg, additionalDataVec, objects);
 
+    event_extensions::Context context{
+        busLog,
+        objPath,
+    };
+
+    auto eventExtensions = eventExtensionManager.create(context, requests);
+
     auto e = std::make_unique<Entry>(
         busLog, objPath, entryId,
         ms, // Milliseconds since 1970
         errLvl, std::move(errMsg), std::move(additionalData),
-        std::move(objects), fwVersion, getEntrySerializePath(entryId), *this);
+        std::move(objects), fwVersion, getEntrySerializePath(entryId), *this,
+        std::move(eventExtensions));
 
     serialize(*e);
     serializeJSON(*e);
+
+    e->emit_object_added();
 
     if (isQuiesceOnErrorEnabled() && (errLvl < Entry::sevLowerLimit) &&
         isCalloutPresent(*e))
@@ -309,8 +327,10 @@ auto Manager::createFromEvent(
     sdbusplus::exception::generated_event_base&& event)
     -> sdbusplus::object_path
 {
-    auto [msg, level, data] = lg2::details::extractEvent(std::move(event));
-    return this->createEntry(msg, level, std::move(data));
+    auto eventInfo = lg2::details::extractEvent(std::move(event));
+
+    return this->createEntry(eventInfo.message, eventInfo.level,
+                             std::move(eventInfo.additionalData));
 }
 
 bool Manager::isQuiesceOnErrorEnabled()
@@ -465,8 +485,7 @@ void Manager::quiesceOnError(const uint32_t entryId)
     auto callback = std::make_unique<sdbusplus::match>(
         this->busLog,
         propertiesChanged(entryPath, "xyz.openbmc_project.Logging.Entry"),
-        std::bind(std::mem_fn(&Manager::onEntryResolve), this,
-                  std::placeholders::_1));
+        std::bind_front(&Manager::onEntryResolve, this));
 
     propChangedEntryCallback.insert(
         std::make_pair(entryId, std::move(callback)));
@@ -571,7 +590,6 @@ size_t Manager::eraseAll()
             ++iter;
             erase(e);
         }
-        entryId = 0;
     }
     else
     {
@@ -595,17 +613,6 @@ size_t Manager::eraseAll()
             {
                 entriesSize--;
             }
-        }
-        if (!entries.empty())
-        {
-            entryId = std::ranges::max_element(entries, [](const auto& a,
-                                                           const auto& b) {
-                          return a.first < b.first;
-                      })->first;
-        }
-        else
-        {
-            entryId = 0;
         }
     }
     return entriesSize;
@@ -640,6 +647,10 @@ void Manager::erase(uint32_t entryId)
                            "ERROR", e);
             }
         }
+
+        // Execute entry-specific extension cleanup before the
+        // entry is removed.
+        entryFound->second->cleanupExtensions();
 
         // Delete the persistent representation of this error.
         fs::path errorPath(paths::error());
@@ -715,17 +726,31 @@ void Manager::restore()
         {
             continue;
         }
-
-        uint32_t idNum = std::stoul(id.substr(0, id.size() - 5));
-        files.try_emplace(idNum, file.path());
+        try
+        {
+            uint32_t idNum = std::stoul(id.substr(0, id.size() - 5));
+            files.try_emplace(idNum, file.path());
+        }
+        catch (const std::exception& e)
+        {
+            lg2::error("Skipping malformed log filename {NAME}: {ERROR}",
+                       "NAME", id, "ERROR", e);
+        }
     }
     // Look for Cereal.
     for (auto& file : fs::directory_iterator(dir))
     {
         auto id = file.path().filename().string();
-        uint32_t idNum = std::stoul(id);
-
-        files.try_emplace(idNum, file.path());
+        try
+        {
+            uint32_t idNum = std::stoul(id);
+            files.try_emplace(idNum, file.path());
+        }
+        catch (const std::exception& e)
+        {
+            lg2::error("Skipping malformed log filename {NAME}: {ERROR}",
+                       "NAME", id, "ERROR", e);
+        }
     }
 
     for (const auto& [idNum, filePath] : files)
@@ -734,29 +759,42 @@ void Manager::restore()
             busLog, std::string(OBJ_ENTRY) + '/' + std::to_string(idNum), idNum,
             *this);
 
-        if (filePath.extension() == ".json")
-        {
-            deserializeJSON(filePath, *e);
-            e->path(filePath, true);
-        }
-        else
-        {
-            deserialize(filePath, *e);
+        const bool isJson = (filePath.extension() == ".json");
 
-            // If we got here, either we didn't record the file in JSON
-            // previously, such as due to an upgrade, or it is corrupted.
-            // Rewrite the JSON now and ensure the path is adjusted.
-            auto jsonPath = serializeJSON(*e);
-            e->path(jsonPath, true);
+        if (isJson)
+        {
+            nlohmann::json eventExtensions;
+            if (!deserializeJSON(filePath, *e, eventExtensions))
+            {
+                continue;
+            }
+            e->path(filePath, true);
+
+            restoreEventExtensions(*e, eventExtensions);
+        }
+        else if (!deserialize(filePath, *e))
+        {
+            continue;
         }
 
         // Sanity check for proper deserialization.
         if (!sanity(static_cast<uint32_t>(idNum), e->id()))
         {
             lg2::error(
-                "Unable to find or parse error entry {ID_NUM}/?{ENTRY_ID}: {PATH}",
+                "Unable to find or parse error entry {ID_NUM}/{ENTRY_ID}: {PATH}",
                 "ID_NUM", idNum, "ENTRY_ID", e->id(), "PATH", filePath);
             continue;
+        }
+
+        if (!isJson)
+        {
+            // Either the JSON file was never written, such as for an entry
+            // created by a code level that predates it, or it could not be
+            // used.  Write it now that the entry has passed the checks above,
+            // so that a damaged file can never be turned into a new,
+            // syntactically valid JSON file.
+            auto jsonPath = serializeJSON(*e);
+            e->path(jsonPath, true);
         }
 
         // Add the event to the appropriate queue.
@@ -810,20 +848,43 @@ auto Manager::create(const std::string& message, Entry::Level severity,
                      const std::map<std::string, std::string>& additionalData,
                      const FFDCEntries& ffdc) -> sdbusplus::object_path
 {
-    return createEntry(message, severity, additionalData, ffdc);
+    auto data = additionalData;
+    constexpr std::string_view extensionInterface{RUNTIME_METADATA_PLUGIN};
+    /*
+     * Generate runtime metadata only when a runtime metadata plugin
+     * is configured and the caller has not already supplied extension
+     * data through _EXTENSIONS.
+     */
+    if (!extensionInterface.empty() && !data.contains("_EXTENSIONS"))
+    {
+        auto metadata = collectRuntimeMetadata(message, severity, data);
+        if (!metadata.empty())
+        {
+            auto payload = eventExtensionManager.buildRuntimeMetadataPayload(
+                extensionInterface, metadata);
+            if (!payload.empty())
+            {
+                updateExtensions(data, extensionInterface, payload);
+            }
+        }
+    }
+    auto requests = buildEventExtensionRequests(data);
+
+    return createEntry(message, severity, std::move(data), ffdc,
+                       std::move(requests));
 }
 
 void Manager::setupErrorFileWatch()
 {
     auto errDir = paths::error();
 
-    // In the redundant BMC sync flow, files are written to a temporary path
-    // first and moved into place only after the write completes. Using
-    // IN_MOVED_TO ensures we react only when the finalized file appears in the
-    // target directory.
+    // In the redundant BMC sync flow, files are written to a temporary
+    // path first and moved into place only after the write completes.
+    // Using IN_MOVED_TO ensures we react only when the finalized file
+    // appears in the target directory.
     //
-    // IN_DELETE handles synced file removals so the corresponding in-memory
-    // event log entry is also removed.
+    // IN_DELETE handles synced file removals so the corresponding
+    // in-memory event log entry is also removed.
     uint32_t mask = IN_MOVED_TO | IN_DELETE;
 
     if (!util::setupInotifyWatch(errDir, mask, errDirInotifyFD,
@@ -1021,6 +1082,108 @@ bool Manager::refreshFromDisk(uint32_t id)
     existingEntry->path(path, true);
 
     return true;
+}
+
+auto Manager::buildEventExtensionRequests(
+    std::map<std::string, std::string>& additionalData)
+    -> event_extensions::RequestList
+{
+    event_extensions::RequestList requests;
+
+    auto extIt = additionalData.find("_EXTENSIONS");
+    if (extIt == additionalData.end())
+    {
+        return requests;
+    }
+
+    try
+    {
+        auto extensions = nlohmann::json::parse(extIt->second);
+
+        for (const auto& [interface, data] : extensions.items())
+        {
+            requests.emplace_back(event_extensions::Request{
+                .interface = interface,
+                .data = data,
+            });
+        }
+    }
+    catch (const std::exception& e)
+    {
+        lg2::error("Failed to process event extension metadata: "
+                   "{ERROR}",
+                   "ERROR", e.what());
+    }
+
+    /*
+     * Extension metadata is transport-only and should
+     * not be persisted as entry additional data.
+     */
+    additionalData.erase(extIt);
+
+    return requests;
+}
+
+void Manager::restoreEventExtensions(Entry& entry,
+                                     const nlohmann::json& eventExtensions)
+{
+    if (eventExtensions.empty())
+    {
+        return;
+    }
+    event_extensions::Context context{
+        busLog,
+        std::string(OBJ_ENTRY) + '/' + std::to_string(entry.id()),
+    };
+    auto restoredExtensions =
+        eventExtensionManager.restore(context, eventExtensions);
+    entry.setEventExtensions(std::move(restoredExtensions));
+}
+
+void Manager::updateExtensions(
+    std::map<std::string, std::string>& additionalData,
+    std::string_view interface, const nlohmann::json& payload)
+{
+    nlohmann::json extensions = nlohmann::json::object();
+
+    auto extIt = additionalData.find(extensionsKey);
+    if (extIt != additionalData.end())
+    {
+        try
+        {
+            extensions = nlohmann::json::parse(extIt->second);
+        }
+        catch (const std::exception& e)
+        {
+            lg2::warning("Failed to parse extension metadata: {ERROR}", "ERROR",
+                         e);
+        }
+    }
+
+    extensions[std::string(interface)] = payload;
+    additionalData[extensionsKey] = extensions.dump();
+}
+
+nlohmann::json Manager::collectRuntimeMetadata(
+    const std::string& message, Entry::Level level,
+    const std::map<std::string, std::string>& additionalData)
+{
+    auto metadata = nlohmann::json::object();
+
+    for (auto& provider : Extensions::getRuntimeMetadataFunctions())
+    {
+        try
+        {
+            provider(metadata, message, level, additionalData);
+        }
+        catch (const std::exception& e)
+        {
+            lg2::warning("Ignoring runtime metadata exception: {ERROR}",
+                         "ERROR", e.what());
+        }
+    }
+
+    return metadata;
 }
 
 } // namespace internal

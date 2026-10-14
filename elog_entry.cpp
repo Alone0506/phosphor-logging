@@ -15,11 +15,33 @@ namespace phosphor
 namespace logging
 {
 
+void Entry::persist()
+{
+    serialize(*this);
+    serializeJSON(*this);
+}
+
 // TODO Add interfaces to handle the error log id numbering
 
 void Entry::delete_()
 {
     parent.erase(id());
+}
+
+void Entry::cleanupExtensions()
+{
+    for (auto& eventExtension : eventExtensions)
+    {
+        try
+        {
+            eventExtension->onDelete();
+        }
+        catch (const std::exception& e)
+        {
+            lg2::error("Event extension delete callback failed: {ERROR}",
+                       "ERROR", e);
+        }
+    }
 }
 
 bool Entry::resolved(bool value)
@@ -65,8 +87,7 @@ bool Entry::resolved(bool value)
                           .count();
         updateTimestamp(ms);
 
-        serialize(*this);
-        serializeJSON(*this);
+        persist();
     }
 
     return current;
@@ -81,8 +102,7 @@ std::string Entry::eventId(std::string value)
         current =
             sdbusplus::server::xyz::openbmc_project::logging::Entry::eventId(
                 value);
-        serialize(*this);
-        serializeJSON(*this);
+        persist();
     }
 
     return current;
@@ -97,8 +117,7 @@ std::string Entry::resolution(std::string value)
         current =
             sdbusplus::server::xyz::openbmc_project::logging::Entry::resolution(
                 value);
-        serialize(*this);
-        serializeJSON(*this);
+        persist();
     }
 
     return current;
@@ -106,13 +125,14 @@ std::string Entry::resolution(std::string value)
 
 sdbusplus::message::unix_fd Entry::getEntry()
 {
-    std::string jsonPath = path() + ".json";
+    std::string jsonPath =
+        (paths::error_json() / (std::to_string(id()) + ".json")).string();
     int fd = open(jsonPath.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd == -1)
     {
         auto e = errno;
         lg2::error("Failed to open Entry File ERRNO={ERRNO}, PATH={PATH}",
-                   "ERRNO", e, "PATH", path());
+                   "ERRNO", e, "PATH", jsonPath);
         throw sdbusplus::xyz::openbmc_project::Common::File::Error::Open();
     }
 
@@ -120,8 +140,7 @@ sdbusplus::message::unix_fd Entry::getEntry()
     // D-Bus.
     sdeventplus::Event event = sdeventplus::Event::get_default();
     fdCloseEventSource = std::make_unique<sdeventplus::source::Defer>(
-        event, std::bind(std::mem_fn(&Entry::closeFD), this, fd,
-                         std::placeholders::_1));
+        event, std::bind_front(&Entry::closeFD, this, fd));
 
     return fd;
 }

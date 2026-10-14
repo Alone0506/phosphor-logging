@@ -1,7 +1,6 @@
 #pragma once
 
-#include "config.h"
-
+#include "constants.hpp"
 #include "data_interface.hpp"
 #include "event_logger.hpp"
 #include "host_notifier.hpp"
@@ -467,7 +466,7 @@ class Manager : public PELInterface
      *
      * @param[in] pel - The PEL to use
      *
-     * @return bool - false for Repositor::for_each().
+     * @return bool - false for Repository::for_each().
      */
     bool updateResolution(const openpower::pels::PEL& pel);
 
@@ -514,7 +513,7 @@ class Manager : public PELInterface
      * the BMC power/thermal or fans component ID, clear the deconfig flag.
      *
      * @param[in] locationCode - The location code to look for
-     * @param[inout] pel - The PEL to check and modify.
+     * @param[in,out] pel - The PEL to check and modify.
      * @return bool - true if the flag was cleared for this PEL
      */
     static bool clearPowerThermalDeconfigFlag(const std::string& locationCode,

@@ -16,6 +16,11 @@ conf_data.set(
 
 redundant_bmc = get_option('redundant-bmc')
 conf_data.set10('redundant_bmc', redundant_bmc)
+conf_data.set('max_cper_raw_binary_size', get_option('max-cper-raw-binary-size'))
+conf_data.set(
+    'runtime_metadata_plugin',
+    get_option('runtime-metadata-plugin'),
+)
 
 cxx = meson.get_compiler('cpp')
 if cxx.has_header('poll.h')
@@ -23,7 +28,7 @@ if cxx.has_header('poll.h')
 endif
 
 conf_h_dep = declare_dependency(
-    include_directories: include_directories('.'),
+    include_directories: include_directories('.', '..'),
     sources: configure_file(
         input: 'config.h.meson',
         output: 'config.h',

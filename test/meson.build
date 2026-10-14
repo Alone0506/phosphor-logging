@@ -22,6 +22,11 @@ endif
 if get_option('openpower-pel-extension').allowed()
     subdir('openpower-pels')
 endif
+if get_option('amd-event-log').allowed()
+    subdir('amd-event-log')
+endif
+
+subdir('event_extensions')
 
 tests = [
     'bmc_pos_mgr_test',
@@ -61,6 +66,21 @@ foreach t : tests
         ),
     )
 endforeach
+
+log_create_extensions_test = executable(
+    'test-log-create-extensions',
+    'log_create_extensions_test.cpp',
+    '../log_create_extensions.cpp',
+    dependencies: [
+        conf_h_dep,
+        gtest_dep,
+        nlohmann_json_dep,
+        pdi_dep,
+        sdbusplus_dep,
+    ],
+    include_directories: include_directories('..'),
+)
+test('test_log_create_extensions', log_create_extensions_test)
 
 tests_non_parallel = [
     'elog_quiesce_test',
